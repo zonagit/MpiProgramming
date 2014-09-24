@@ -9,19 +9,19 @@ CFLAGS=-I.
 %.o: %.cpp
 				$(CXX) -c -o $@ $< $(CFLAGS)
 
-all: samplesort seqsort
+all: samplesortdisk samplesort seqsort
 
 seqsort: seqsort.o 
 			  $(LINK) -o $@ $< 
 
 samplesort: samplesort.o 
 			  $(LINK) -o $@ $< 
-#data: data.o 
-#			  $(LINK) -o $@ $< 
+samplesortdisk: samplesortdisk.o 
+			  $(LINK) -o $@ $< 
 
 
 #select: select.o 
 #			  $(LINK) -o $@ $< 
 
 clean:
-	rm -f *.o *~ seqsort samplesort
+	rm -f *.o *~ seqsort samplesort samplesortdisk

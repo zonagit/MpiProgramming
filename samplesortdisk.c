@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 
 #include <mpi.h>
 
@@ -8,24 +9,12 @@
 #define DEBUG_SPLITTERS 0
 #define DEBUG_BUCKETS 0
 #define DEBUG_FINAL_SORT 0
-#define USE_SMALL_ARRAY 0
 
+char * PATH = "/uufs/chpc.utah.edu/common/home/ci-water4-0/CS6965/data/";
 char * ws;//strong or weak scaling indicator
-int rank,npes, root =0; 
-
-//Generate a random number within the range min-max
-int rand_interval(int min,int max){
-  int r;
-  const int range = max - min;
-  const int buckets = RAND_MAX/range;
-  const int limit = buckets * range;
-
-  do {
-    r = rand();
-  } while (r >= limit);
-
-  return min + (r/buckets);
-}
+char * input_filename,*output_filename;//filename from where to read the array 
+//elements and where to write final sorted buckets
+int rank,npes, root =0;
 
 int compare (const void *a, const void *b)
 {
@@ -54,7 +43,12 @@ void samplesort(long int *a,size_t count,size_t size,int (compare)(const void *,
   long int *local_splitters,*all_splitters,*global_splitters;
   int *send_counts,*recv_counts,*idx;
   int *send_offsets,*recv_offsets;
-  long int * buckets;
+  long int * buckets,*file_offsets;
+
+  MPI_File output_file;
+  MPI_Status status;
+  MPI_Offset file_offset;
+ 
 #if DEBUG_INITIAL_SORT
   for (i=0;i<count;i++) {
     printf("Initial elements per processor:Rank  %d %lu\n",rank,a[i]);
@@ -211,19 +205,20 @@ void samplesort(long int *a,size_t count,size_t size,int (compare)(const void *,
   }
   MPI_Barrier(comm);
 #endif
-  /*//Gather at the root the lengths of all the buckets
-   MPI_Gather(&j,1,MPI_LONG,recv_counts,1,MPI_LONG,root,comm);
-  //Compute index offsets where to put the bucket elements
-  if (rank == root) {
-    k = 0;
-    for (i=0;i<count;i++) {
-      recv_offsets[i]=k;
-      k += recv_counts[i];
-    }
-    //gather sorted data
-    */
-  //Now we have to put all the buckets together in the original array a
- 
+  //write buckets to file
+  file_offsets = (long int*) malloc(npes *size);
+  file_offsets[0]=0;
+  for (i=1;i<npes;i++) {
+    file_offsets[i] = file_offsets[i-1] + j;
+  }
+
+  MPI_File_open(comm, output_filename, MPI_MODE_CREATE|MPI_MODE_WRONLY, MPI_INFO_NULL, &output_file);
+  file_offset = file_offsets[rank]*size;
+  MPI_File_seek(output_file, file_offset, MPI_SEEK_SET);
+  MPI_File_write(output_file, buckets, j, MPI_LONG, &status);
+
+  MPI_File_close(&output_file);
+
   free(local_splitters);
   free(all_splitters);
   free(global_splitters);
@@ -232,50 +227,58 @@ void samplesort(long int *a,size_t count,size_t size,int (compare)(const void *,
   free(recv_counts);
   free(send_offsets);
   free(recv_offsets);
-  //free(buckets);
+  free(buckets);
+  free(file_offsets);
 }
 
-void sort(long int n)
+void sort()
 {
   long int i;
+  long int n;
   long int* a;
   long int psize;//size of data in a given processor
-
+  MPI_File input_file;
+  MPI_Status status;
+  MPI_Offset num_bytes, file_offset;
+ 
+ //open the file in all processes in read only mode 
+  int ec = MPI_File_open(MPI_COMM_WORLD,input_filename,MPI_MODE_RDONLY, MPI_INFO_NULL, &input_file);
+  if (ec != MPI_SUCCESS) {
+    printf("Failed to open input file. Either the name or the path of the file is wrong. Code=%d\n",ec);
+    return;
+  } 
+  MPI_File_get_size(input_file,&num_bytes);
+  //figure out the number of elements in the file
+  n = num_bytes/sizeof(long int);
   if (strcmp(ws,"strong") == 0) {
     psize = n/npes;
   }   
   if (strcmp(ws,"weak") == 0) {
     psize = n;
   }
- 
-  //Initialize array with random numbers.
-  //Notice that rand generates a max random number of about 2 billion
-  //so for n near or above a billion there will be many duplicates
-  //To avoid this we would have to use a different generator that
-  //would generate longs
-  srand(n+rank);
+  printf("%lu %d %d\n",n,npes,psize);
+  //read psize elements into array a for each process
+  file_offset = rank * psize;
   //assume that n is always divisible by npes
   a = (long int*) malloc (psize * sizeof(long int)); 
-  for (i=0;i<psize;i++) {
-      a[i] = rand();
+  MPI_File_seek(input_file,file_offset,MPI_SEEK_SET);
+  ec = MPI_File_read(input_file,&a,psize,MPI_LONG,&status);
+  if (ec != MPI_SUCCESS) {
+    printf("rank=%d\n",rank);
   }
-#if USE_SMALL_ARRAY
-  for (i=0;i<n;i++) {
-    a[i] = rand_interval(rank,rank*2+30);
-  }   
-#endif
-  double t1,t2;
+  //MPI_File_close(&input_file);
+ 
+  /*  double t1,t2;
   t1 = MPI_Wtime();
-  samplesort(a,psize,sizeof(long int),compare,MPI_COMM_WORLD);
+  // samplesort(a,psize,sizeof(long int),compare,MPI_COMM_WORLD);
   t2 = MPI_Wtime();
   printf("Time elapsed in rank %d was %f\n",rank, t2-t1);
-  //free(a);
+  free(a);*/
 }
 
 int main(int argc,char** argv)
 { 
   int return_code;
-  long int n;
 
   //Initialize
   MPI_Init(&argc,&argv); 
@@ -285,31 +288,32 @@ int main(int argc,char** argv)
 
   if (argc != 3) { 
     if (rank == root)
-      printf("Usage: mpirun/mpiexec -np xx ./samplesort n strong/weak\n");
+      printf("Usage: mpirun/mpiexec -np xx ./samplesortdisk strong/weak filename\n");
 
     MPI_Finalize();
     return -1;
   }
 
-  //Read size of array and whether we are doing strong/weak scaling
-  n = atol(argv[1]);
-  ws = argv[2];
-
+  //Read whether we are doing strong/weak scaling and the filename
+  ws = argv[1];
+  input_filename = malloc(900);
+  strcpy(input_filename,PATH);
+  strcat(input_filename,argv[2]);
+  
   if (strcmp(ws,"strong")!=0 && strcmp(ws,"weak")!=0) {
     if (rank == root)
       printf("Invalid option. Please enter strong or weak for the last command line option.\n");
 
     MPI_Finalize();
     return -1;
-  }   
+    }  
 
-#if USE_SMALL_ARRAY
-  n = 32;
-  ws = "weak";
-#endif  
-  sort(n);
+  sort();
   
+  free(input_filename);
+
   //Finalize
   MPI_Finalize();
   return 0;
 }
+
