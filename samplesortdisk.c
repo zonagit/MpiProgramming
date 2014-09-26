@@ -5,13 +5,14 @@
 
 #include <mpi.h>
 
+#define DEBUG_FILE_READ 0
 #define DEBUG_INITIAL_SORT 0
-#define DEBUG_SPLITTERS 0
+#define DEBUG_SPLITTERS 1
 #define DEBUG_BUCKETS 0
 #define DEBUG_FINAL_SORT 0
 
-char * PATH = "/uufs/chpc.utah.edu/common/home/ci-water4-0/CS6965/data/";
-char * ws;//strong or weak scaling indicator
+char * INPUT_PATH = "/uufs/chpc.utah.edu/common/home/ci-water4-0/CS6965/data/";
+char * OUTPUT_PATH = "/uufs/chpc.utah.edu/common/home/ci-water4-0/CS6965/u0082100/assignment1/";
 char * input_filename,*output_filename;//filename from where to read the array 
 //elements and where to write final sorted buckets
 int rank,npes, root =0;
@@ -48,6 +49,7 @@ void samplesort(long int *a,size_t count,size_t size,int (compare)(const void *,
   MPI_File output_file;
   MPI_Status status;
   MPI_Offset file_offset;
+  int file_open_error,file_write_error;
  
 #if DEBUG_INITIAL_SORT
   for (i=0;i<count;i++) {
@@ -211,8 +213,22 @@ void samplesort(long int *a,size_t count,size_t size,int (compare)(const void *,
   for (i=1;i<npes;i++) {
     file_offsets[i] = file_offsets[i-1] + j;
   }
+  //open the file in all processes in read only mode 
+  file_open_error = MPI_File_open(comm, output_filename, MPI_MODE_CREATE|MPI_MODE_WRONLY, MPI_INFO_NULL, &output_file);
+  if (file_open_error != MPI_SUCCESS) {
+    char error_string[1000];
+    int length_of_error_string, error_class;
 
-  MPI_File_open(comm, output_filename, MPI_MODE_CREATE|MPI_MODE_WRONLY, MPI_INFO_NULL, &output_file);
+    MPI_Error_class(file_open_error,&error_class);
+    MPI_Error_string(error_class,error_string,&length_of_error_string);
+    printf("%3d: %s\n",rank,error_string);
+
+    MPI_Error_string(file_open_error,error_string,&length_of_error_string);
+    printf("%3d: %s\n",rank,error_string);
+
+    printf("Failed to open output file. Error Code=%d\n",file_open_error);
+    MPI_Abort(comm, file_open_error);
+  }
   file_offset = file_offsets[rank]*size;
   MPI_File_seek(output_file, file_offset, MPI_SEEK_SET);
   MPI_File_write(output_file, buckets, j, MPI_LONG, &status);
@@ -233,47 +249,82 @@ void samplesort(long int *a,size_t count,size_t size,int (compare)(const void *,
 
 void sort()
 {
-  long int i;
-  long int n;
-  long int* a;
-  long int psize;//size of data in a given processor
+  long int * a;
+  long int psize;//size of array data in a given processor
   MPI_File input_file;
   MPI_Status status;
-  MPI_Offset num_bytes, file_offset;
+  //MPI_Offset is long long
+  MPI_Offset num_bytes, num_bytes_ll, max_num_bytes_ll, file_offset;
+  int file_open_error, file_read_error;
  
- //open the file in all processes in read only mode 
-  int ec = MPI_File_open(MPI_COMM_WORLD,input_filename,MPI_MODE_RDONLY, MPI_INFO_NULL, &input_file);
-  if (ec != MPI_SUCCESS) {
-    printf("Failed to open input file. Either the name or the path of the file is wrong. Code=%d\n",ec);
-    return;
+  //open the file in all processes in read only mode 
+  file_open_error = MPI_File_open(MPI_COMM_WORLD,input_filename,MPI_MODE_RDONLY, MPI_INFO_NULL, &input_file);
+  if (file_open_error != MPI_SUCCESS) {
+    char error_string[1000];
+    int length_of_error_string, error_class;
+
+    MPI_Error_class(file_open_error,&error_class);
+    MPI_Error_string(error_class,error_string,&length_of_error_string);
+    printf("%3d: %s\n",rank,error_string);
+
+    MPI_Error_string(file_open_error,error_string,&length_of_error_string);
+    printf("%3d: %s\n",rank,error_string);
+
+    printf("Failed to open input file. Either the name or the path of the file is wrong. Error Code=%d\n",file_open_error);
+    MPI_Abort(MPI_COMM_WORLD, file_open_error);
   } 
   MPI_File_get_size(input_file,&num_bytes);
-  //figure out the number of elements in the file
-  n = num_bytes/sizeof(long int);
-  if (strcmp(ws,"strong") == 0) {
-    psize = n/npes;
-  }   
-  if (strcmp(ws,"weak") == 0) {
-    psize = n;
+#if DEBUG_FILE_READ
+  printf("%3d: total_number_of_bytes = %lld\n",rank,num_bytes);
+#endif
+  num_bytes_ll = num_bytes/npes;
+  //If npes does not divide num_bytes evenly, the last process will have to 
+  //read more data, i.e. to the end of the file
+  max_num_bytes_ll = num_bytes_ll + num_bytes % npes;
+
+  if (num_bytes_ll != max_num_bytes_ll) {
+    printf("Last process will read more bytes than previous processes\n");
   }
-  printf("%lu %d %d\n",n,npes,psize);
-  //read psize elements into array a for each process
-  file_offset = rank * psize;
-  //assume that n is always divisible by npes
-  a = (long int*) malloc (psize * sizeof(long int)); 
-  MPI_File_seek(input_file,file_offset,MPI_SEEK_SET);
-  ec = MPI_File_read(input_file,&a,psize,MPI_LONG,&status);
-  if (ec != MPI_SUCCESS) {
-    printf("rank=%d\n",rank);
+  if (max_num_bytes_ll < INT_MAX) {
+    //figure out the number of int elements in the file
+    psize = num_bytes_ll/sizeof(long int);
+#if DEBUG_FILE_READ      
+    printf("Array Size=%d\n",psize);
+#endif
+    //read psize elements into array a for each process
+    file_offset = rank * psize;
+    //assume that n is always divisible by npes
+    a = (long int*) malloc (psize * sizeof(long int)); 
+    MPI_File_seek(input_file,file_offset,MPI_SEEK_SET);
+    file_read_error = MPI_File_read(input_file,a,psize,MPI_LONG,&status);
+    //inspect content of binary file with 
+    //hexdump -v -e '7/4 "%12d "' -e '"\n"' ../../../ci-water4-0/CS6965/data/sort_data_debug.dat > tt
+    //and check that the first few digits in tt match a[0],a[1].a[2] returned 
+    //by p0. Files have 8 byte (long) numbers
+
+#if DEBUG_FILE_READ
+    printf("rank:%d a[0]:%ld psize-1:%ld a[psize-1]:%ld\n", rank,a[0],(psize-1),a[psize-1]);
+#endif
+    if (rank == root) {
+      printf("Finished reading data from file\n");
+    }
+    if (file_read_error != MPI_SUCCESS) {
+      printf("Read fail by rank=%d\n",rank);
+      MPI_Abort(MPI_COMM_WORLD,file_read_error);
+    }
   }
-  //MPI_File_close(&input_file);
+  else {
+    printf("Not enough memory to read the file.\n");
+    printf("Consider running on more nodes.\n");
+  }
+  MPI_File_close(&input_file);
  
-  /*  double t1,t2;
+  double t1,t2;
   t1 = MPI_Wtime();
-  // samplesort(a,psize,sizeof(long int),compare,MPI_COMM_WORLD);
+  samplesort(a,psize,sizeof(long int),compare,MPI_COMM_WORLD);
   t2 = MPI_Wtime();
   printf("Time elapsed in rank %d was %f\n",rank, t2-t1);
-  free(a);*/
+  free(a);
 }
 
 int main(int argc,char** argv)
@@ -288,26 +339,20 @@ int main(int argc,char** argv)
 
   if (argc != 3) { 
     if (rank == root)
-      printf("Usage: mpirun/mpiexec -np xx ./samplesortdisk strong/weak filename\n");
+      printf("Usage: mpirun/mpiexec -np xx ./samplesortdisk input_filename output_filename\n");
 
     MPI_Finalize();
     return -1;
   }
 
   //Read whether we are doing strong/weak scaling and the filename
-  ws = argv[1];
   input_filename = malloc(900);
-  strcpy(input_filename,PATH);
-  strcat(input_filename,argv[2]);
-  
-  if (strcmp(ws,"strong")!=0 && strcmp(ws,"weak")!=0) {
-    if (rank == root)
-      printf("Invalid option. Please enter strong or weak for the last command line option.\n");
+  strcpy(input_filename,INPUT_PATH);
+  strcat(input_filename,argv[1]);
 
-    MPI_Finalize();
-    return -1;
-    }  
-
+  output_filename = malloc(900);
+  strcpy(output_filename,OUTPUT_PATH);
+  strcat(output_filename,argv[2]);
   sort();
   
   free(input_filename);
@@ -316,4 +361,3 @@ int main(int argc,char** argv)
   MPI_Finalize();
   return 0;
 }
-
