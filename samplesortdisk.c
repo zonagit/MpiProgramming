@@ -5,11 +5,13 @@
 
 #include <mpi.h>
 
-#define DEBUG_FILE_READ 0
+#define GBYTE 1073741824
+#define DEBUG_FILE_READ 1
 #define DEBUG_INITIAL_SORT 0
-#define DEBUG_SPLITTERS 1
+#define DEBUG_SPLITTERS 0
 #define DEBUG_BUCKETS 0
 #define DEBUG_FINAL_SORT 0
+#define DEBUG_FILE_WRITE 0
 
 char * INPUT_PATH = "/uufs/chpc.utah.edu/common/home/ci-water4-0/CS6965/data/";
 char * OUTPUT_PATH = "/uufs/chpc.utah.edu/common/home/ci-water4-0/CS6965/u0082100/assignment1/";
@@ -207,13 +209,21 @@ void samplesort(long int *a,size_t count,size_t size,int (compare)(const void *,
   }
   MPI_Barrier(comm);
 #endif
+  if (rank == root) {
+    printf("Finished sorting\n");
+  }
+  
   //write buckets to file
+  int *bucket_sizes = (int*) malloc(npes*sizeof(int));
+  //all processes need to know the size of all buckets
+  MPI_Allgather(&j, 1, MPI_INT, bucket_sizes, 1, MPI_INT, comm);
+
   file_offsets = (long int*) malloc(npes *size);
   file_offsets[0]=0;
   for (i=1;i<npes;i++) {
-    file_offsets[i] = file_offsets[i-1] + j;
+    file_offsets[i] = file_offsets[i-1] + bucket_sizes[i-1];
   }
-  //open the file in all processes in read only mode 
+  //open the file in all processes in create/write only mode 
   file_open_error = MPI_File_open(comm, output_filename, MPI_MODE_CREATE|MPI_MODE_WRONLY, MPI_INFO_NULL, &output_file);
   if (file_open_error != MPI_SUCCESS) {
     char error_string[1000];
@@ -231,9 +241,72 @@ void samplesort(long int *a,size_t count,size_t size,int (compare)(const void *,
   }
   file_offset = file_offsets[rank]*size;
   MPI_File_seek(output_file, file_offset, MPI_SEEK_SET);
+  double start = MPI_Wtime();
   MPI_File_write(output_file, buckets, j, MPI_LONG, &status);
-
+  double end = MPI_Wtime();
+  double write_time = end-start;
   MPI_File_close(&output_file);
+  double longest_write_time;
+  MPI_Allreduce(&write_time,&longest_write_time,1,MPI_DOUBLE,MPI_MAX,comm);
+  if (rank == root)
+    printf("Finished writing sorted data to file\n");
+  //compute write throughput
+  long int total_number_of_bytes;
+  for (i=0;i<npes;i++) 
+    total_number_of_bytes += bucket_sizes[i];
+  total_number_of_bytes = total_number_of_bytes * size;
+  printf("Write throughput =%f GB/s\n",total_number_of_bytes/longest_write_time/GBYTE);
+#if DEBUG_FILE_WRITE
+  printf("My rank is %d. My bucket size was %d and my first element was %ld and the last was %ld\n",rank,j,buckets[0],buckets[j-1]);
+  printf("rank %d has bucket size %d\n",rank,bucket_sizes[rank]);
+  MPI_Barrier(comm);
+   
+  //read elements from file anin chunks the size of rank 0 bucket size
+  //and check if all elements are in increasing order
+  if (rank == root) {
+    printf("Reading output file\n");
+    FILE *ftest = fopen(output_filename, "rb");
+    int upper = 2* bucket_sizes[0];
+    long int curr_value, prev_value = 0, file_pos = 0;
+    int low_limit=0;
+    long int *test_buffer = (long int*)malloc(upper*size);
+    int stop = 0;
+    do {
+      curr_value = fread(test_buffer, size, upper, ftest);
+      for(i = 0; i < upper; i++) {
+	file_pos++;
+	if(test_buffer[i] >= prev_value) {
+	  prev_value = test_buffer[i];
+	  //print first and last elements of first,second,third,... buckets
+	  int sum =0;
+	  for (k=0;k<npes;k++) {
+	    sum += bucket_sizes[k];
+	    if (file_pos== sum) {
+	      if (k==0)
+		printf("rank %d range %ld %ld\n",k,test_buffer[0],test_buffer[i]);
+	      else
+		printf("rank %d range %ld %ld. File position %ld\n",k,low_limit,test_buffer[i],file_pos);
+	      if (k==(npes-1)) {
+		stop = 1;
+		break;
+	      }
+	    }
+	    else if (file_pos == sum+1) {
+	      low_limit = test_buffer[i];
+	    }
+	  }
+	  continue;
+	}
+	else if (stop == 0) {
+	  printf("value %ld at i=%d is smaller than value %ld at some previous position\n", test_buffer[i],i,prev_value);
+	  printf("This happened at location %ld in the file %d\n",file_pos); 
+	  break;
+	}
+      }
+    } while (curr_value>0 && stop ==0);
+    free(test_buffer);
+  }
+#endif
 
   free(local_splitters);
   free(all_splitters);
@@ -245,6 +318,7 @@ void samplesort(long int *a,size_t count,size_t size,int (compare)(const void *,
   free(recv_offsets);
   free(buckets);
   free(file_offsets);
+  free(bucket_sizes);
 }
 
 void sort()
@@ -323,7 +397,7 @@ void sort()
   t1 = MPI_Wtime();
   samplesort(a,psize,sizeof(long int),compare,MPI_COMM_WORLD);
   t2 = MPI_Wtime();
-  printf("Time elapsed in rank %d was %f\n",rank, t2-t1);
+  // printf("Time elapsed in rank %d was %f\n",rank, t2-t1);
   free(a);
 }
 
@@ -354,9 +428,9 @@ int main(int argc,char** argv)
   strcpy(output_filename,OUTPUT_PATH);
   strcat(output_filename,argv[2]);
   sort();
-  
+  printf("%s %s\n",input_filename,output_filename);
   free(input_filename);
-
+  free(output_filename);
   //Finalize
   MPI_Finalize();
   return 0;
