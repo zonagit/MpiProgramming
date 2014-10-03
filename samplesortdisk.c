@@ -6,7 +6,7 @@
 #include <mpi.h>
 
 #define GBYTE 1073741824
-#define DEBUG_FILE_READ 1
+#define DEBUG_FILE_READ 0
 #define DEBUG_INITIAL_SORT 0
 #define DEBUG_SPLITTERS 0
 #define DEBUG_BUCKETS 0
@@ -87,7 +87,6 @@ void samplesort(long int *a,size_t count,size_t size,int (compare)(const void *,
   //4a. All the npes*(npes-1) set of splitters are gathered at the root
   all_splitters = (long int *)malloc(npes*(npes-1)*size);
   MPI_Gather(local_splitters,npes-1,MPI_LONG,all_splitters,npes-1,MPI_LONG,root,comm);
-
   //4b. The root sorts all the npes*(npes-1) splitters and then chooses
   //npes-1 equally spaced elements from among them
   global_splitters = local_splitters;
@@ -161,7 +160,6 @@ void samplesort(long int *a,size_t count,size_t size,int (compare)(const void *,
   //recv_counts[1]=send_counts[0] from p1,recv_counts[2]=send_counts[0]
   //from p2, i.e. recv_counts for p0 has the number of elements in the
   //first bucket in each processor. Similarly for p1 and p2
-  
 #if DEBUG_BUCKETS
   MPI_Barrier(comm);
   for (i=0;i<npes;i++){
@@ -193,7 +191,6 @@ void samplesort(long int *a,size_t count,size_t size,int (compare)(const void *,
   //p0 and for p2 recv_counts[0]=send_counts[2] of p0, etc
   //each processor sorts local buckets. 
   qsort(buckets,j,size,compare);
-
 #if DEBUG_FINAL_SORT
   MPI_Barrier(comm);
   for (i=0;i<count;i++) {
@@ -211,8 +208,8 @@ void samplesort(long int *a,size_t count,size_t size,int (compare)(const void *,
 #endif
   if (rank == root) {
     printf("Finished sorting\n");
+    fflush(stdout);
   }
-  
   //write buckets to file
   int *bucket_sizes = (int*) malloc(npes*sizeof(int));
   //all processes need to know the size of all buckets
@@ -246,8 +243,11 @@ void samplesort(long int *a,size_t count,size_t size,int (compare)(const void *,
   double end = MPI_Wtime();
   double write_time = end-start;
   MPI_File_close(&output_file);
-  double longest_write_time;
+  double longest_write_time,smallest_write_time,total_write_time;
+  MPI_Allreduce(&write_time,&total_write_time,1,MPI_DOUBLE,MPI_SUM,comm);
   MPI_Allreduce(&write_time,&longest_write_time,1,MPI_DOUBLE,MPI_MAX,comm);
+  MPI_Allreduce(&write_time,&smallest_write_time,1,MPI_DOUBLE,MPI_MIN,comm);
+
   if (rank == root)
     printf("Finished writing sorted data to file\n");
   //compute write throughput
@@ -255,7 +255,13 @@ void samplesort(long int *a,size_t count,size_t size,int (compare)(const void *,
   for (i=0;i<npes;i++) 
     total_number_of_bytes += bucket_sizes[i];
   total_number_of_bytes = total_number_of_bytes * size;
-  printf("Write throughput =%f GB/s\n",total_number_of_bytes/longest_write_time/GBYTE);
+  if (rank == root) {
+    printf("Total time %f\n",total_write_time);
+    printf("Total Write throughput =%f GB/s\n",total_number_of_bytes/total_write_time/GBYTE);
+    printf("Smallest Write throughput =%f GB/s\n",total_number_of_bytes/longest_write_time/GBYTE);
+    printf("Largest write throughput =%f GB/s\n",total_number_of_bytes/smallest_write_time/GBYTE);
+    fflush(stdout);
+  }
 #if DEBUG_FILE_WRITE
   printf("My rank is %d. My bucket size was %d and my first element was %ld and the last was %ld\n",rank,j,buckets[0],buckets[j-1]);
   printf("rank %d has bucket size %d\n",rank,bucket_sizes[rank]);
@@ -381,6 +387,7 @@ void sort()
 #endif
     if (rank == root) {
       printf("Finished reading data from file\n");
+      fflush(stdout);
     }
     if (file_read_error != MPI_SUCCESS) {
       printf("Read fail by rank=%d\n",rank);
@@ -428,7 +435,7 @@ int main(int argc,char** argv)
   strcpy(output_filename,OUTPUT_PATH);
   strcat(output_filename,argv[2]);
   sort();
-  printf("%s %s\n",input_filename,output_filename);
+  //  printf("%s %s\n",input_filename,output_filename);
   free(input_filename);
   free(output_filename);
   //Finalize
